@@ -23,8 +23,8 @@ use std::{
 #[command(
     author = "fontgrepc authors",
     version,
-    about = "A cache-based tool for fast font searching",
-    long_about = "fontgrepc is a command-line tool that helps you find fonts based on their properties, such as OpenType features, variation axes, scripts, and more. It requires fonts to be indexed into a cache database first, enabling extremely fast searches."
+    about = "find fonts in a cache, based on various criteria",
+    long_about = "fontgrepc: CLI tool that finds fonts in a cahce that contain specified features, axes, codepoints, scripts"
 )]
 pub struct Cli {
     /// Subcommand to execute
@@ -177,7 +177,7 @@ pub struct SearchArgs {
     #[arg(
         short = 'u',
         long,
-        value_parser = parse_codepoints,
+        value_delimiter = ',',
         help = "Unicode codepoints or ranges to search for (e.g., U+0041-U+005A,U+0061)",
         long_help = "Comma-separated list of Unicode codepoints or ranges to search for. \
                     Formats accepted:\n\
@@ -185,7 +185,7 @@ pub struct SearchArgs {
                     - Range: U+0041-U+005A\n\
                     - Single character: A"
     )]
-    pub codepoints: Vec<char>,
+    pub codepoints_str: Vec<String>,
 
     /// Text to check for support
     #[arg(
@@ -251,7 +251,7 @@ pub fn execute(cli: Cli) -> Result<()> {
                 scripts: args.scripts.clone(),
                 tables: args.tables.clone(),
                 name_patterns: args.name.clone(),
-                codepoints: args.codepoints.clone(),
+                codepoints: parse_codepoints_from_strings(&args.codepoints_str)?,
                 charset: args.text.clone().unwrap_or_default(),
             };
 
@@ -635,4 +635,15 @@ fn parse_codepoint(input: &str) -> Result<char> {
 
     char::from_u32(cp)
         .ok_or_else(|| FontgrepcError::Parse(format!("Invalid Unicode codepoint: U+{:04X}", cp)))
+}
+
+/// Parse codepoints from strings
+pub fn parse_codepoints_from_strings(input: &[String]) -> Result<Vec<char>> {
+    let mut result = Vec::new();
+
+    for item in input {
+        result.extend(parse_codepoints(item)?);
+    }
+
+    Ok(result)
 }

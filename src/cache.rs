@@ -727,16 +727,22 @@ impl QueryBuilder {
             return self;
         }
 
-        // Optimize charset search by using a single LIKE condition
-        let mut charset_str = String::new();
-        for c in charset.chars() {
-            charset_str.push('%');
-            charset_str.push(c);
+        // Sort the input characters (since the charset_string in the database is sorted)
+        let mut sorted_chars: Vec<char> = charset.chars().collect();
+        sorted_chars.sort();
+        
+        // Create a pattern with wildcards between each character
+        // For example, "яą" becomes "%ą%я%"
+        let mut pattern = String::with_capacity(sorted_chars.len() * 2 + 1);
+        pattern.push('%');
+        for c in sorted_chars {
+            pattern.push(c);
+            pattern.push('%');
         }
-        charset_str.push('%');
-
+        
         self.conditions.push("f.charset_string LIKE ?".to_string());
-        self.params.push(Box::new(charset_str));
+        self.params.push(Box::new(pattern));
+        
         self
     }
 

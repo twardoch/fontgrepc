@@ -1,6 +1,6 @@
 [package]
 name = "fontgrepc"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 authors = ["fontgrepc authors", "Simon Cozens", "Adam Twardoch"]
 description = "A cache-based tool for fast font searching"
