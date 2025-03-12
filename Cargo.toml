@@ -1,0 +1,50 @@
+[package]
+name = "fontgrepc"
+version = "1.0.0"
+edition = "2021"
+authors = ["Adam Twardoch"]
+description = "A cache-based tool for fast font searching"
+license = "MIT"
+repository = "https://github.com/twardoch/fontgrepc"
+readme = "README.md"
+keywords = ["font", "search", "opentype", "typography", "cache"]
+categories = ["command-line-utilities", "text-processing"]
+
+[lib]
+name = "fontgrepc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fontgrepc"
+path = "src/main.rs"
+
+[dependencies]
+# Core dependencies
+skrifa = "0.28.1"
+clap = { version = "4.4.6", features = ["derive"] }
+regex = "1.9.5"
+rusqlite = { version = "0.34.0", features = ["bundled"] }
+r2d2 = "0.8.10"
+r2d2_sqlite = "0.27.0"
+rayon = "1.8.0"
+jwalk = "0.8.1"
+thiserror = "2.0.12"
+serde = { version = "1.0.188", features = ["derive"] }
+serde_json = "1.0.107"
+dirs = "6.0.0"
+num_cpus = "1.16.0"
+memmap2 = "0.9.5"
+env_logger = "0.11.2"
+log = "0.4.20"
+chrono = { version = "0.4.34", features = ["serde"] }
+indicatif = "0.17.8"
+
+[dev-dependencies]
+tempfile = "3.8.0"
+criterion = "0.5.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true 
