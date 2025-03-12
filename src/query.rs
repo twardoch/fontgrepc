@@ -11,11 +11,11 @@ use crate::{
     },
     FontgrepcError, Result,
 };
+use rayon::prelude::*;
 use regex::Regex;
 use skrifa::Tag;
-use std::{path::PathBuf, str::FromStr, time::Instant};
-use rayon::prelude::*;
 use std::sync::{Arc, Mutex};
+use std::{path::PathBuf, str::FromStr, time::Instant};
 
 /// Query criteria for finding fonts
 #[derive(Debug, Default, Clone)]
@@ -60,7 +60,7 @@ impl QueryCriteria {
 
     /// Check if this is a simple feature query that can use the optimized path
     pub fn is_simple_feature_query(&self) -> bool {
-        !self.features.is_empty() 
+        !self.features.is_empty()
             && !self.variable
             && self.axes.is_empty()
             && self.scripts.is_empty()
@@ -132,18 +132,21 @@ impl FontQuery {
                     } else {
                         results
                     };
-                    
+
                     let elapsed = start_time.elapsed();
                     log::info!(
                         "SQL query executed in {:.2}ms, found {} results",
                         elapsed.as_secs_f64() * 1000.0,
                         filtered_results.len()
                     );
-                    
+
                     return Ok(filtered_results);
                 }
                 Err(e) => {
-                    log::debug!("SQL query failed, falling back to in-memory filtering: {}", e);
+                    log::debug!(
+                        "SQL query failed, falling back to in-memory filtering: {}",
+                        e
+                    );
                     // Fall back to in-memory filtering
                 }
             }
@@ -178,7 +181,9 @@ impl FontQuery {
             .iter()
             .filter(|path_str| {
                 let path = std::path::Path::new(path_str);
-                paths.iter().any(|search_path| path.starts_with(search_path))
+                paths
+                    .iter()
+                    .any(|search_path| path.starts_with(search_path))
             })
             .cloned()
             .collect()
@@ -195,7 +200,7 @@ impl FontQuery {
 
         // Filter fonts based on criteria in parallel
         let matching_fonts = Arc::new(Mutex::new(Vec::new()));
-        
+
         font_paths.par_iter().for_each(|path| {
             if let Ok(Some(font_info)) = self.cache.get_font_info(path) {
                 if let Ok(true) = self.font_matches(&font_info) {
@@ -223,13 +228,15 @@ impl FontQuery {
             .into_iter()
             .filter(|path_str| {
                 let path = std::path::Path::new(path_str);
-                paths.iter().any(|search_path| path.starts_with(search_path))
+                paths
+                    .iter()
+                    .any(|search_path| path.starts_with(search_path))
             })
             .collect();
 
         // Filter fonts based on criteria in parallel
         let matching_fonts = Arc::new(Mutex::new(Vec::new()));
-        
+
         filtered_paths.par_iter().for_each(|path| {
             if let Ok(Some(font_info)) = self.cache.get_font_info(path) {
                 if let Ok(true) = self.font_matches(&font_info) {

@@ -4,6 +4,7 @@
 
 use crate::{font::FontInfo, query::QueryCriteria, FontgrepcError};
 use chrono::{DateTime, Utc};
+use lazy_static::lazy_static;
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection, ToSql};
 use std::{
@@ -13,7 +14,6 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
-use lazy_static::lazy_static;
 
 // Define a Result type for this module
 type Result<T> = std::result::Result<T, FontgrepcError>;
@@ -88,7 +88,8 @@ impl Drop for TransactionGuard<'_> {
 
 // Connection pool for better performance
 lazy_static! {
-    static ref CONNECTION_POOL: Mutex<HashMap<String, Arc<Mutex<Connection>>>> = Mutex::new(HashMap::new());
+    static ref CONNECTION_POOL: Mutex<HashMap<String, Arc<Mutex<Connection>>>> =
+        Mutex::new(HashMap::new());
 }
 
 impl FontCache {
@@ -170,20 +171,20 @@ impl FontCache {
         } else {
             // File-based database - use connection pooling
             let path_str = self.path.to_string_lossy().to_string();
-            
+
             // Try to get a connection from the pool
             let mut pool = CONNECTION_POOL.lock().unwrap();
-            
+
             if let Some(conn) = pool.get(&path_str) {
                 // Return a new connection to the same database
                 let conn_guard = conn.lock().unwrap();
                 drop(conn_guard); // Release the lock before creating a new connection
                 return Ok(Connection::open(&self.path)?);
             }
-            
+
             // Create a new connection and add it to the pool
             let conn = Connection::open(&self.path)?;
-            
+
             // Set pragmas for better performance
             conn.execute_batch(
                 "
@@ -194,11 +195,12 @@ impl FontCache {
                 PRAGMA page_size = 4096;
                 PRAGMA cache_size = -2000;
                 PRAGMA foreign_keys = ON;
-            ")?;
-            
+            ",
+            )?;
+
             // Add to pool
             pool.insert(path_str, Arc::new(Mutex::new(conn)));
-            
+
             // Return a new connection
             Ok(Connection::open(&self.path)?)
         }
@@ -307,7 +309,7 @@ impl FontCache {
 
         // Execute the query with proper parameter conversion
         let conn = self.get_connection()?;
-        
+
         // Use prepare_cached for better performance with repeated queries
         let mut stmt = conn.prepare_cached(&query)?;
 
@@ -344,49 +346,49 @@ impl FontCache {
         }
 
         let conn = self.get_connection()?;
-        
+
         // Create a more efficient query that uses JOINs instead of EXISTS
         let mut query = String::from(
             "SELECT DISTINCT f.path FROM fonts f 
              JOIN properties p ON p.font_id = f.id 
-             WHERE p.type = 'feature' AND p.value IN ("
+             WHERE p.type = 'feature' AND p.value IN (",
         );
-        
+
         // Create placeholders for the IN clause
         let placeholders: Vec<String> = (0..features.len()).map(|_| "?".to_string()).collect();
         query.push_str(&placeholders.join(","));
         query.push_str(") GROUP BY f.id HAVING COUNT(DISTINCT p.value) = ?");
-        
+
         // Prepare the statement
         let mut stmt = conn.prepare_cached(&query)?;
-        
+
         // Create parameters
         let mut params: Vec<&dyn ToSql> = Vec::with_capacity(features.len() + 1);
         for feature in features {
             params.push(feature as &dyn ToSql);
         }
-        
+
         // Fix the temporary value issue by creating a binding
         let feature_count = features.len() as i64;
         params.push(&feature_count as &dyn ToSql);
-        
+
         // Execute the query
         let start_time = Instant::now();
         let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, String>(0))?;
-        
+
         // Collect results
         let mut results = Vec::with_capacity(100);
         for row_result in rows {
             results.push(row_result?);
         }
-        
+
         let elapsed = start_time.elapsed();
         log::debug!(
             "Feature query executed in {:.2}ms, found {} results",
             elapsed.as_secs_f64() * 1000.0,
             results.len()
         );
-        
+
         Ok(results)
     }
 
@@ -701,7 +703,7 @@ impl QueryBuilder {
         if values.is_empty() {
             return self;
         }
-        
+
         let alias = format!("p{}", self.joins);
         self.joins += 1;
 
@@ -740,7 +742,7 @@ impl QueryBuilder {
         if patterns.is_empty() {
             return self;
         }
-        
+
         let mut name_conditions = Vec::new();
         for pattern in patterns {
             name_conditions.push("f.name_string LIKE ?".to_string());
@@ -756,7 +758,7 @@ impl QueryBuilder {
         if charset.is_empty() {
             return self;
         }
-        
+
         // For charset queries, use a single LIKE condition with all characters
         // This is more efficient than multiple separate conditions
         let mut charset_str = String::new();
@@ -765,7 +767,7 @@ impl QueryBuilder {
             charset_str.push(c);
         }
         charset_str.push('%');
-        
+
         self.conditions.push("f.charset_string LIKE ?".to_string());
         self.params.push(Box::new(charset_str));
         self
