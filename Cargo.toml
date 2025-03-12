@@ -1,6 +1,6 @@
 [package]
 name = "fontgrepc"
-version = "1.0.2"
+version = "1.0.4"
 edition = "2021"
 authors = ["fontgrepc authors", "Simon Cozens", "Adam Twardoch"]
 description = "A cache-based tool for fast font searching"
@@ -24,8 +24,6 @@ skrifa = "0.28.1"
 clap = { version = "4.4.6", features = ["derive"] }
 regex = "1.9.5"
 rusqlite = { version = "0.34.0", features = ["bundled"] }
-r2d2 = "0.8.10"
-r2d2_sqlite = "0.27.0"
 rayon = "1.8.0"
 jwalk = "0.8.1"
 thiserror = "2.0.12"
@@ -37,7 +35,6 @@ memmap2 = "0.9.5"
 env_logger = "0.11.2"
 log = "0.4.20"
 chrono = { version = "0.4.34", features = ["serde"] }
-indicatif = "0.17.8"
 lazy_static = "1.4.0"
 
 [dev-dependencies]

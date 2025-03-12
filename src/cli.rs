@@ -11,6 +11,7 @@ use crate::{
 };
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use jwalk::WalkDir;
+use rayon;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -300,41 +301,98 @@ pub fn execute(cli: Cli) -> Result<()> {
                 return Ok(());
             }
 
-            // Process font files
-            let mut fonts_to_update = Vec::new();
-            let mut processed = 0;
-            let mut skipped = 0;
+            // Process font files in parallel using rayon
+            let start_time = Instant::now();
 
-            for path in &font_files {
-                // Check if font needs to be updated
-                let path_str = path.to_string_lossy().to_string();
-                let mtime = get_file_mtime(path)?;
-                let size = get_file_size(path)?;
+            // Create a thread pool with the specified number of threads
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(args.jobs)
+                .build()
+                .unwrap();
 
-                if args.force || cache.needs_update(&path_str, mtime, size)? {
-                    // Load font info
-                    match FontInfo::load(path) {
-                        Ok(info) => {
-                            // In verbose mode, print the path of each font being added
-                            if cli.verbose {
-                                println!("Adding: {}", path.display());
+            // Use the thread pool to process fonts in parallel
+            let (fonts_to_update, stats) = pool.install(|| {
+                use rayon::prelude::*;
+
+                // Process fonts in parallel and collect results
+                let results: Vec<_> = font_files
+                    .par_iter()
+                    .map(|path| {
+                        let path_str = path.to_string_lossy().to_string();
+                        let mtime = match get_file_mtime(path) {
+                            Ok(mtime) => mtime,
+                            Err(e) => {
+                                log::warn!("Error getting mtime for {}: {}", path.display(), e);
+                                return (None, false);
                             }
-                            fonts_to_update.push((path_str, info, mtime, size));
-                            processed += 1;
+                        };
+                        let size = match get_file_size(path) {
+                            Ok(size) => size,
+                            Err(e) => {
+                                log::warn!("Error getting size for {}: {}", path.display(), e);
+                                return (None, false);
+                            }
+                        };
+
+                        // Check if font needs to be updated
+                        let needs_update = match cache.needs_update(&path_str, mtime, size) {
+                            Ok(needs_update) => args.force || needs_update,
+                            Err(e) => {
+                                log::warn!(
+                                    "Error checking if {} needs update: {}",
+                                    path.display(),
+                                    e
+                                );
+                                return (None, false);
+                            }
+                        };
+
+                        if needs_update {
+                            // Load font info
+                            match FontInfo::load(path) {
+                                Ok(info) => {
+                                    // In verbose mode, print the path of each font being added
+                                    if cli.verbose {
+                                        println!("Adding: {}", path.display());
+                                    }
+                                    (Some((path_str, info, mtime, size)), true)
+                                }
+                                Err(e) => {
+                                    log::warn!("Error loading font {}: {}", path.display(), e);
+                                    (None, true)
+                                }
+                            }
+                        } else {
+                            (None, false)
                         }
-                        Err(e) => {
-                            log::warn!("Error loading font {}: {}", path.display(), e);
-                        }
+                    })
+                    .collect();
+
+                // Process results
+                let mut fonts_to_update = Vec::new();
+                let mut processed = 0;
+                let mut skipped = 0;
+                let mut errors = 0;
+
+                for (font_info, attempted) in results {
+                    if let Some(info) = font_info {
+                        fonts_to_update.push(info);
+                        processed += 1;
+                    } else if attempted {
+                        errors += 1;
+                    } else {
+                        skipped += 1;
                     }
-                } else {
-                    skipped += 1;
                 }
-            }
+
+                (fonts_to_update, (processed, skipped, errors))
+            });
+
+            let (processed, skipped, errors) = stats;
 
             // Update cache
             if !fonts_to_update.is_empty() {
-                // Update cache without progress bar
-                let start_time = Instant::now();
+                // Update cache
                 cache.batch_update_fonts(fonts_to_update)?;
                 let elapsed = start_time.elapsed();
 
@@ -346,27 +404,22 @@ pub fn execute(cli: Cli) -> Result<()> {
                     let result = serde_json::json!({
                         "processed": processed,
                         "skipped": skipped,
-                        "total": processed + skipped,
+                        "errors": errors,
+                        "total": processed + skipped + errors,
                         "time_ms": elapsed.as_millis()
                     });
                     println!("{}", serde_json::to_string_pretty(&result)?);
-                } else if !cli.verbose {
-                    // In non-verbose mode, only show minimal output
-                    println!("Added {} fonts", processed);
+                } else {
+                    println!(
+                        "Added {} fonts, skipped {} unchanged fonts, encountered {} errors in {:.2} seconds.",
+                        processed,
+                        skipped,
+                        errors,
+                        elapsed.as_secs_f64()
+                    );
                 }
-            } else if cli.json {
-                let result = serde_json::json!({
-                    "processed": 0,
-                    "skipped": skipped,
-                    "total": skipped,
-                    "time_ms": 0
-                });
-                println!("{}", serde_json::to_string_pretty(&result)?);
-            } else if !cli.verbose {
-                // In non-verbose mode, only show minimal output if something was skipped
-                if skipped > 0 {
-                    println!("No fonts added, {} unchanged", skipped);
-                }
+            } else {
+                println!("No fonts needed to be added to the cache.");
             }
         }
         Commands::List => {

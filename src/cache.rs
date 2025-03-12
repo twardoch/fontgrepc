@@ -4,7 +4,6 @@
 
 use crate::{font::FontInfo, query::QueryCriteria, FontgrepcError};
 use chrono::{DateTime, Utc};
-use lazy_static::lazy_static;
 use rusqlite::OptionalExtension;
 use rusqlite::{params, Connection, ToSql};
 use std::{
@@ -86,11 +85,8 @@ impl Drop for TransactionGuard<'_> {
     }
 }
 
-// Connection pool for better performance
-lazy_static! {
-    static ref CONNECTION_POOL: Mutex<HashMap<String, Arc<Mutex<Connection>>>> =
-        Mutex::new(HashMap::new());
-}
+// Simplified connection handling - removed the complex connection pool
+// and replaced with direct connection management
 
 impl FontCache {
     /// Create a new font cache
@@ -161,28 +157,13 @@ impl FontCache {
     fn get_connection(&self) -> Result<Connection> {
         if let Some(conn) = &self.conn {
             // For in-memory database, we need to return a connection to the same database
-            // This is a limitation of SQLite - we can't clone the connection directly
-            // So we just return a new connection to the same in-memory database
             let conn_guard = conn.lock().unwrap();
             // We can't use try_clone or backup with MutexGuard
             // For in-memory database, we'll just return a new connection to the same path
             drop(conn_guard); // Release the lock before creating a new connection
             Ok(Connection::open(":memory:")?)
         } else {
-            // File-based database - use connection pooling
-            let path_str = self.path.to_string_lossy().to_string();
-
-            // Try to get a connection from the pool
-            let mut pool = CONNECTION_POOL.lock().unwrap();
-
-            if let Some(conn) = pool.get(&path_str) {
-                // Return a new connection to the same database
-                let conn_guard = conn.lock().unwrap();
-                drop(conn_guard); // Release the lock before creating a new connection
-                return Ok(Connection::open(&self.path)?);
-            }
-
-            // Create a new connection and add it to the pool
+            // File-based database - create a new connection
             let conn = Connection::open(&self.path)?;
 
             // Set pragmas for better performance
@@ -198,11 +179,7 @@ impl FontCache {
             ",
             )?;
 
-            // Add to pool
-            pool.insert(path_str, Arc::new(Mutex::new(conn)));
-
-            // Return a new connection
-            Ok(Connection::open(&self.path)?)
+            Ok(conn)
         }
     }
 
@@ -227,33 +204,71 @@ impl FontCache {
         }
 
         let mut conn = self.get_connection()?;
+
+        // Begin transaction
         let tx = conn.transaction()?;
         let mut guard = TransactionGuard::new(tx);
 
+        // Prepare statements once for reuse
+        let mut insert_font_stmt = guard.transaction().prepare(
+            "INSERT INTO fonts (path, name_string, is_variable, charset_string, mtime, size, updated_at) 
+             VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )?;
+
+        let mut delete_properties_stmt = guard
+            .transaction()
+            .prepare("DELETE FROM properties WHERE font_id = ?")?;
+
+        let mut insert_property_stmt = guard
+            .transaction()
+            .prepare("INSERT INTO properties (font_id, type, value) VALUES (?, ?, ?)")?;
+
+        // Process fonts in batches
         for (path, info, mtime, size) in fonts {
             // Insert or update font
-            let font_id = self.insert_font(
-                &guard,
+            insert_font_stmt.execute(params![
                 &path,
                 &info.name_string,
                 info.is_variable,
                 &info.charset_string,
                 mtime,
                 size,
-            )?;
+                Utc::now().timestamp()
+            ])?;
+
+            let font_id = guard.transaction().last_insert_rowid();
 
             // Delete existing properties
-            guard
-                .transaction()
-                .execute("DELETE FROM properties WHERE font_id = ?", params![font_id])?;
+            delete_properties_stmt.execute(params![font_id])?;
 
-            // Insert properties
-            self.batch_insert_properties(&guard, font_id, "axis", &info.axes)?;
-            self.batch_insert_properties(&guard, font_id, "feature", &info.features)?;
-            self.batch_insert_properties(&guard, font_id, "script", &info.scripts)?;
-            self.batch_insert_properties(&guard, font_id, "table", &info.tables)?;
+            // Insert properties in batches
+            // Insert axes
+            for axis in &info.axes {
+                insert_property_stmt.execute(params![font_id, "axis", axis])?;
+            }
+
+            // Insert features
+            for feature in &info.features {
+                insert_property_stmt.execute(params![font_id, "feature", feature])?;
+            }
+
+            // Insert scripts
+            for script in &info.scripts {
+                insert_property_stmt.execute(params![font_id, "script", script])?;
+            }
+
+            // Insert tables
+            for table in &info.tables {
+                insert_property_stmt.execute(params![font_id, "table", table])?;
+            }
         }
 
+        // Drop the prepared statements before committing to avoid borrow issues
+        drop(insert_font_stmt);
+        drop(delete_properties_stmt);
+        drop(insert_property_stmt);
+
+        // Commit transaction
         guard.commit()?;
 
         Ok(())
@@ -478,44 +493,6 @@ impl FontCache {
         }
     }
 
-    /// Insert a font into the cache
-    #[allow(clippy::too_many_arguments)]
-    fn insert_font(
-        &self,
-        guard: &TransactionGuard,
-        path: &str,
-        name_string: &str,
-        is_variable: bool,
-        charset_string: &str,
-        mtime: i64,
-        size: i64,
-    ) -> Result<i64> {
-        guard.transaction().execute(
-            "INSERT INTO fonts (path, name_string, is_variable, charset_string, mtime, size, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![path, name_string, is_variable, charset_string, mtime, size, Utc::now().timestamp()],
-        )?;
-
-        Ok(guard.transaction().last_insert_rowid())
-    }
-
-    /// Batch insert properties
-    fn batch_insert_properties(
-        &self,
-        guard: &TransactionGuard,
-        font_id: i64,
-        property_type: &str,
-        values: &[String],
-    ) -> Result<()> {
-        for value in values {
-            guard.transaction().execute(
-                "INSERT INTO properties (font_id, type, value) VALUES (?, ?, ?)",
-                params![font_id, property_type, value],
-            )?;
-        }
-
-        Ok(())
-    }
-
     /// Get properties for a font
     fn get_properties(
         &self,
@@ -673,22 +650,18 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Builder for SQL queries
-#[allow(dead_code)]
+/// Query builder for constructing SQL queries
 struct QueryBuilder {
     conditions: Vec<String>,
     params: Vec<Box<dyn ToSql>>,
-    joins: usize,
 }
 
-#[allow(dead_code)]
 impl QueryBuilder {
     /// Create a new query builder
     fn new() -> Self {
         Self {
             conditions: Vec::new(),
             params: Vec::new(),
-            joins: 0,
         }
     }
 
@@ -704,27 +677,21 @@ impl QueryBuilder {
             return self;
         }
 
-        let alias = format!("p{}", self.joins);
-        self.joins += 1;
-
-        // Use a more efficient JOIN-based approach for better performance
+        // Optimize by using a single EXISTS subquery with IN clause
+        // instead of multiple joins for better performance
         let placeholders: Vec<String> = (0..values.len()).map(|_| "?".to_string()).collect();
+
+        // Simplified query that achieves the same result with less complexity
         let condition = format!(
             "EXISTS (
-                SELECT 1 FROM properties {} 
-                WHERE {}.font_id = f.id 
-                AND {}.type = ? 
-                AND {}.value IN ({})
-                GROUP BY {}.font_id
-                HAVING COUNT(DISTINCT {}.value) = ?
+                SELECT 1 FROM properties 
+                WHERE properties.font_id = f.id 
+                AND properties.type = ? 
+                AND properties.value IN ({})
+                GROUP BY properties.font_id
+                HAVING COUNT(DISTINCT properties.value) = ?
             )",
-            alias,
-            alias,
-            alias,
-            alias,
-            placeholders.join(","),
-            alias,
-            alias
+            placeholders.join(",")
         );
 
         self.conditions.push(condition);
@@ -743,6 +710,7 @@ impl QueryBuilder {
             return self;
         }
 
+        // Optimize by combining multiple patterns into a single OR condition
         let mut name_conditions = Vec::new();
         for pattern in patterns {
             name_conditions.push("f.name_string LIKE ?".to_string());
@@ -759,8 +727,7 @@ impl QueryBuilder {
             return self;
         }
 
-        // For charset queries, use a single LIKE condition with all characters
-        // This is more efficient than multiple separate conditions
+        // Optimize charset search by using a single LIKE condition
         let mut charset_str = String::new();
         for c in charset.chars() {
             charset_str.push('%');

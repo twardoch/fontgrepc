@@ -38,10 +38,6 @@ pub enum FontgrepcError {
     #[error("Parse error: {0}")]
     Parse(String),
 
-    /// Connection pool errors
-    #[error("Connection pool error: {0}")]
-    Pool(#[from] r2d2::Error),
-
     /// Serialization errors
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
