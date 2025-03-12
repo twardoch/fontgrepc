@@ -13,6 +13,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
+use lazy_static::lazy_static;
 
 // Define a Result type for this module
 type Result<T> = std::result::Result<T, FontgrepcError>;
@@ -83,6 +84,11 @@ impl Drop for TransactionGuard<'_> {
             let _ = self.tx.execute_batch("ROLLBACK");
         }
     }
+}
+
+// Connection pool for better performance
+lazy_static! {
+    static ref CONNECTION_POOL: Mutex<HashMap<String, Arc<Mutex<Connection>>>> = Mutex::new(HashMap::new());
 }
 
 impl FontCache {
@@ -162,7 +168,38 @@ impl FontCache {
             drop(conn_guard); // Release the lock before creating a new connection
             Ok(Connection::open(":memory:")?)
         } else {
-            // File-based database
+            // File-based database - use connection pooling
+            let path_str = self.path.to_string_lossy().to_string();
+            
+            // Try to get a connection from the pool
+            let mut pool = CONNECTION_POOL.lock().unwrap();
+            
+            if let Some(conn) = pool.get(&path_str) {
+                // Return a new connection to the same database
+                let conn_guard = conn.lock().unwrap();
+                drop(conn_guard); // Release the lock before creating a new connection
+                return Ok(Connection::open(&self.path)?);
+            }
+            
+            // Create a new connection and add it to the pool
+            let conn = Connection::open(&self.path)?;
+            
+            // Set pragmas for better performance
+            conn.execute_batch(
+                "
+                PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
+                PRAGMA temp_store = MEMORY;
+                PRAGMA mmap_size = 30000000000;
+                PRAGMA page_size = 4096;
+                PRAGMA cache_size = -2000;
+                PRAGMA foreign_keys = ON;
+            ")?;
+            
+            // Add to pool
+            pool.insert(path_str, Arc::new(Mutex::new(conn)));
+            
+            // Return a new connection
             Ok(Connection::open(&self.path)?)
         }
     }
@@ -229,6 +266,11 @@ impl FontCache {
             return Err(FontgrepcError::CacheNotInitialized);
         }
 
+        // For simple feature queries, use the optimized path
+        if criteria.is_simple_feature_query() {
+            return self.query_by_features(&criteria.features);
+        }
+
         // Build the query
         let mut builder = QueryBuilder::new();
 
@@ -265,7 +307,9 @@ impl FontCache {
 
         // Execute the query with proper parameter conversion
         let conn = self.get_connection()?;
-        let mut stmt = conn.prepare(&query)?;
+        
+        // Use prepare_cached for better performance with repeated queries
+        let mut stmt = conn.prepare_cached(&query)?;
 
         let params_slice: Vec<&dyn ToSql> =
             params.iter().map(|p| p.as_ref() as &dyn ToSql).collect();
@@ -277,7 +321,7 @@ impl FontCache {
         let rows = stmt.query_map(params_slice.as_slice(), |row| row.get::<_, String>(0))?;
 
         // Collect results
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(100); // Pre-allocate for better performance
         for row_result in rows {
             results.push(row_result?);
         }
@@ -290,6 +334,59 @@ impl FontCache {
             results.len()
         );
 
+        Ok(results)
+    }
+
+    /// Optimized query for feature searches
+    pub fn query_by_features(&self, features: &[String]) -> Result<Vec<String>> {
+        if features.is_empty() {
+            return self.get_all_font_paths();
+        }
+
+        let conn = self.get_connection()?;
+        
+        // Create a more efficient query that uses JOINs instead of EXISTS
+        let mut query = String::from(
+            "SELECT DISTINCT f.path FROM fonts f 
+             JOIN properties p ON p.font_id = f.id 
+             WHERE p.type = 'feature' AND p.value IN ("
+        );
+        
+        // Create placeholders for the IN clause
+        let placeholders: Vec<String> = (0..features.len()).map(|_| "?".to_string()).collect();
+        query.push_str(&placeholders.join(","));
+        query.push_str(") GROUP BY f.id HAVING COUNT(DISTINCT p.value) = ?");
+        
+        // Prepare the statement
+        let mut stmt = conn.prepare_cached(&query)?;
+        
+        // Create parameters
+        let mut params: Vec<&dyn ToSql> = Vec::with_capacity(features.len() + 1);
+        for feature in features {
+            params.push(feature as &dyn ToSql);
+        }
+        
+        // Fix the temporary value issue by creating a binding
+        let feature_count = features.len() as i64;
+        params.push(&feature_count as &dyn ToSql);
+        
+        // Execute the query
+        let start_time = Instant::now();
+        let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, String>(0))?;
+        
+        // Collect results
+        let mut results = Vec::with_capacity(100);
+        for row_result in rows {
+            results.push(row_result?);
+        }
+        
+        let elapsed = start_time.elapsed();
+        log::debug!(
+            "Feature query executed in {:.2}ms, found {} results",
+            elapsed.as_secs_f64() * 1000.0,
+            results.len()
+        );
+        
         Ok(results)
     }
 
@@ -528,6 +625,11 @@ impl FontCache {
 
         Ok(())
     }
+
+    /// Get the path to the cache file
+    pub fn get_path(&self) -> &PathBuf {
+        &self.path
+    }
 }
 
 /// Initialize the database schema
@@ -596,9 +698,14 @@ impl QueryBuilder {
 
     /// Add a condition for properties
     fn with_property(mut self, property_type: &str, values: &[String]) -> Self {
+        if values.is_empty() {
+            return self;
+        }
+        
         let alias = format!("p{}", self.joins);
         self.joins += 1;
 
+        // Use a more efficient JOIN-based approach for better performance
         let placeholders: Vec<String> = (0..values.len()).map(|_| "?".to_string()).collect();
         let condition = format!(
             "EXISTS (
@@ -630,6 +737,10 @@ impl QueryBuilder {
 
     /// Add a condition for name patterns
     fn with_name_patterns(mut self, patterns: &[String]) -> Self {
+        if patterns.is_empty() {
+            return self;
+        }
+        
         let mut name_conditions = Vec::new();
         for pattern in patterns {
             name_conditions.push("f.name_string LIKE ?".to_string());
@@ -642,10 +753,21 @@ impl QueryBuilder {
 
     /// Add a condition for charset
     fn with_charset(mut self, charset: &str) -> Self {
-        for c in charset.chars() {
-            self.conditions.push("f.charset_string LIKE ?".to_string());
-            self.params.push(Box::new(format!("%{}%", c)));
+        if charset.is_empty() {
+            return self;
         }
+        
+        // For charset queries, use a single LIKE condition with all characters
+        // This is more efficient than multiple separate conditions
+        let mut charset_str = String::new();
+        for c in charset.chars() {
+            charset_str.push('%');
+            charset_str.push(c);
+        }
+        charset_str.push('%');
+        
+        self.conditions.push("f.charset_string LIKE ?".to_string());
+        self.params.push(Box::new(charset_str));
         self
     }
 

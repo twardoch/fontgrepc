@@ -14,6 +14,8 @@ use crate::{
 use regex::Regex;
 use skrifa::Tag;
 use std::{path::PathBuf, str::FromStr, time::Instant};
+use rayon::prelude::*;
+use std::sync::{Arc, Mutex};
 
 /// Query criteria for finding fonts
 #[derive(Debug, Default, Clone)]
@@ -49,6 +51,18 @@ impl QueryCriteria {
         !self.variable
             && self.axes.is_empty()
             && self.features.is_empty()
+            && self.scripts.is_empty()
+            && self.tables.is_empty()
+            && self.name_patterns.is_empty()
+            && self.codepoints.is_empty()
+            && self.charset.is_empty()
+    }
+
+    /// Check if this is a simple feature query that can use the optimized path
+    pub fn is_simple_feature_query(&self) -> bool {
+        !self.features.is_empty() 
+            && !self.variable
+            && self.axes.is_empty()
             && self.scripts.is_empty()
             && self.tables.is_empty()
             && self.name_patterns.is_empty()
@@ -108,6 +122,33 @@ impl FontQuery {
     pub fn execute(&self, paths: &[PathBuf]) -> Result<Vec<String>> {
         let start_time = Instant::now();
 
+        // Try to use the SQL-based query first if criteria is simple
+        if self.can_use_sql_query() {
+            match self.cache.query(&self.criteria) {
+                Ok(results) => {
+                    // Filter by paths if needed
+                    let filtered_results = if !paths.is_empty() {
+                        self.filter_by_paths(&results, paths)
+                    } else {
+                        results
+                    };
+                    
+                    let elapsed = start_time.elapsed();
+                    log::info!(
+                        "SQL query executed in {:.2}ms, found {} results",
+                        elapsed.as_secs_f64() * 1000.0,
+                        filtered_results.len()
+                    );
+                    
+                    return Ok(filtered_results);
+                }
+                Err(e) => {
+                    log::debug!("SQL query failed, falling back to in-memory filtering: {}", e);
+                    // Fall back to in-memory filtering
+                }
+            }
+        }
+
         let results = if paths.is_empty() {
             self.query_cache_all()?
         } else {
@@ -124,6 +165,25 @@ impl FontQuery {
         Ok(results)
     }
 
+    /// Check if we can use the SQL query directly
+    fn can_use_sql_query(&self) -> bool {
+        // SQL query works well for simple criteria
+        // For complex criteria like codepoints or regex patterns, we need in-memory filtering
+        self.criteria.codepoints.is_empty() && self.name_regexes.is_empty()
+    }
+
+    /// Filter results by paths
+    fn filter_by_paths(&self, results: &[String], paths: &[PathBuf]) -> Vec<String> {
+        results
+            .iter()
+            .filter(|path_str| {
+                let path = std::path::Path::new(path_str);
+                paths.iter().any(|search_path| path.starts_with(search_path))
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Query the cache for all fonts
     fn query_cache_all(&self) -> Result<Vec<String>> {
         // Get all fonts from the cache
@@ -133,18 +193,20 @@ impl FontQuery {
             return Err(FontgrepcError::CacheNotInitialized);
         }
 
-        // Filter fonts based on criteria
-        let mut matching_fonts = Vec::new();
-
-        for path in font_paths {
-            if let Ok(Some(font_info)) = self.cache.get_font_info(&path) {
-                if self.font_matches(&font_info)? {
-                    matching_fonts.push(path);
+        // Filter fonts based on criteria in parallel
+        let matching_fonts = Arc::new(Mutex::new(Vec::new()));
+        
+        font_paths.par_iter().for_each(|path| {
+            if let Ok(Some(font_info)) = self.cache.get_font_info(path) {
+                if let Ok(true) = self.font_matches(&font_info) {
+                    let mut fonts = matching_fonts.lock().unwrap();
+                    fonts.push(path.clone());
                 }
             }
-        }
+        });
 
-        Ok(matching_fonts)
+        let fonts = matching_fonts.lock().unwrap();
+        Ok(fonts.clone())
     }
 
     /// Query the cache for fonts in the given paths
@@ -156,27 +218,29 @@ impl FontQuery {
             return Err(FontgrepcError::CacheNotInitialized);
         }
 
-        // Filter fonts based on paths and criteria
-        let mut matching_fonts = Vec::new();
+        // Pre-filter fonts by path
+        let filtered_paths: Vec<String> = all_font_paths
+            .into_iter()
+            .filter(|path_str| {
+                let path = std::path::Path::new(path_str);
+                paths.iter().any(|search_path| path.starts_with(search_path))
+            })
+            .collect();
 
-        for path_str in all_font_paths {
-            let path = std::path::Path::new(&path_str);
-
-            // Check if the path is within any of the specified directories
-            let in_search_path = paths
-                .iter()
-                .any(|search_path| path.starts_with(search_path));
-
-            if in_search_path {
-                if let Ok(Some(font_info)) = self.cache.get_font_info(&path_str) {
-                    if self.font_matches(&font_info)? {
-                        matching_fonts.push(path_str);
-                    }
+        // Filter fonts based on criteria in parallel
+        let matching_fonts = Arc::new(Mutex::new(Vec::new()));
+        
+        filtered_paths.par_iter().for_each(|path| {
+            if let Ok(Some(font_info)) = self.cache.get_font_info(path) {
+                if let Ok(true) = self.font_matches(&font_info) {
+                    let mut fonts = matching_fonts.lock().unwrap();
+                    fonts.push(path.clone());
                 }
             }
-        }
+        });
 
-        Ok(matching_fonts)
+        let fonts = matching_fonts.lock().unwrap();
+        Ok(fonts.clone())
     }
 
     /// Check if a font matches the criteria

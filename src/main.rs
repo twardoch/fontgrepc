@@ -3,26 +3,14 @@
 // Main entry point for the fontgrepc application
 
 use clap::Parser;
-use env_logger::{Builder, Env};
 use fontgrepc::cli;
 use log::{error, info};
 use std::process;
 
 /// Main entry point for the fontgrepc application
 fn main() {
-    // Initialize logging
-    Builder::from_env(Env::default().default_filter_or("info"))
-        .format_timestamp(None)
-        .format_target(false)
-        .init();
-
     // Parse command-line arguments
     let cli = cli::Cli::parse();
-
-    // Enable verbose logging if requested
-    if cli.verbose {
-        log::set_max_level(log::LevelFilter::Debug);
-    }
 
     // Log startup information
     info!("fontgrepc v{}", env!("CARGO_PKG_VERSION"));

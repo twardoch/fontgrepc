@@ -10,7 +10,6 @@ use crate::{
     FontgrepcError, Result,
 };
 use clap::{Args as ClapArgs, Parser, Subcommand};
-use indicatif::{ProgressBar, ProgressStyle};
 use jwalk::WalkDir;
 use std::{
     collections::HashSet,
@@ -21,7 +20,7 @@ use std::{
 /// Command-line arguments for fontgrepc
 #[derive(Parser, Debug)]
 #[command(
-    author = "Adam Twardoch <adam@twardoch.com>",
+    author = "fontgrepc authors",
     version,
     about = "A cache-based tool for fast font searching",
     long_about = "fontgrepc is a command-line tool that helps you find fonts based on their properties, such as OpenType features, variation axes, scripts, and more. It requires fonts to be indexed into a cache database first, enabling extremely fast searches."
@@ -238,7 +237,7 @@ pub fn execute(cli: Cli) -> Result<()> {
     if cli.verbose {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
     } else {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     }
 
     match &cli.command {
@@ -267,12 +266,18 @@ pub fn execute(cli: Cli) -> Result<()> {
             if cli.json {
                 let json = serde_json::to_string_pretty(&results)?;
                 println!("{}", json);
-            } else {
+            } else if cli.verbose {
+                // In verbose mode, show detailed information
                 println!(
                     "Found {} fonts in {:.2}ms:",
                     results.len(),
                     elapsed.as_secs_f64() * 1000.0
                 );
+                for result in results {
+                    println!("{}", result);
+                }
+            } else {
+                // In non-verbose mode, only show the paths
                 for result in results {
                     println!("{}", result);
                 }
@@ -282,6 +287,11 @@ pub fn execute(cli: Cli) -> Result<()> {
             // Initialize cache
             let cache = FontCache::new(cli.cache_path.as_deref())?;
 
+            // In verbose mode, display the cache path
+            if cli.verbose {
+                println!("# Cache: {}", cache.get_path().display());
+            }
+
             // Collect font files
             let font_files = collect_font_files(&args.paths)?;
 
@@ -290,32 +300,12 @@ pub fn execute(cli: Cli) -> Result<()> {
                 return Ok(());
             }
 
-            // Set up progress bar
-            let progress_bar = if !cli.json {
-                let pb = ProgressBar::new(font_files.len() as u64);
-                pb.set_style(
-                    ProgressStyle::default_bar()
-                        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-                        .unwrap()
-                        .progress_chars("#>-"),
-                );
-                Some(pb)
-            } else {
-                None
-            };
-
             // Process font files
             let mut fonts_to_update = Vec::new();
             let mut processed = 0;
             let mut skipped = 0;
 
             for path in &font_files {
-                // Update progress
-                if let Some(pb) = &progress_bar {
-                    pb.set_message(format!("Analyzing {}", path.display()));
-                    pb.inc(1);
-                }
-
                 // Check if font needs to be updated
                 let path_str = path.to_string_lossy().to_string();
                 let mtime = get_file_mtime(path)?;
@@ -325,6 +315,10 @@ pub fn execute(cli: Cli) -> Result<()> {
                     // Load font info
                     match FontInfo::load(path) {
                         Ok(info) => {
+                            // In verbose mode, print the path of each font being added
+                            if cli.verbose {
+                                println!("Adding: {}", path.display());
+                            }
                             fonts_to_update.push((path_str, info, mtime, size));
                             processed += 1;
                         }
@@ -337,45 +331,14 @@ pub fn execute(cli: Cli) -> Result<()> {
                 }
             }
 
-            // Finish progress bar
-            if let Some(pb) = &progress_bar {
-                pb.finish_with_message(format!("Analyzed {} fonts", font_files.len()));
-            }
-
             // Update cache
             if !fonts_to_update.is_empty() {
-                // Set up progress bar for updating
-                let update_progress = if !cli.json {
-                    let pb = ProgressBar::new(fonts_to_update.len() as u64);
-                    pb.set_style(
-                        ProgressStyle::default_bar()
-                            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-                            .unwrap()
-                            .progress_chars("#>-"),
-                    );
-                    pb.set_message("Updating cache");
-                    Some(pb)
-                } else {
-                    None
-                };
-
-                // Update cache
+                // Update cache without progress bar
                 let start_time = Instant::now();
                 cache.batch_update_fonts(fonts_to_update)?;
                 let elapsed = start_time.elapsed();
 
-                // Finish progress bar
-                if let Some(pb) = &update_progress {
-                    pb.finish_with_message(format!(
-                        "Updated cache in {:.2}s",
-                        elapsed.as_secs_f64()
-                    ));
-                }
-
-                // Optimize cache
-                if !cli.json {
-                    println!("Optimizing cache...");
-                }
+                // Optimize cache silently
                 cache.optimize()?;
 
                 // Output results
@@ -387,13 +350,9 @@ pub fn execute(cli: Cli) -> Result<()> {
                         "time_ms": elapsed.as_millis()
                     });
                     println!("{}", serde_json::to_string_pretty(&result)?);
-                } else {
-                    println!(
-                        "Added {} fonts, skipped {} unchanged fonts in {:.2}s",
-                        processed,
-                        skipped,
-                        elapsed.as_secs_f64()
-                    );
+                } else if !cli.verbose {
+                    // In non-verbose mode, only show minimal output
+                    println!("Added {} fonts", processed);
                 }
             } else if cli.json {
                 let result = serde_json::json!({
@@ -403,16 +362,21 @@ pub fn execute(cli: Cli) -> Result<()> {
                     "time_ms": 0
                 });
                 println!("{}", serde_json::to_string_pretty(&result)?);
-            } else {
-                println!(
-                    "No fonts needed updating, skipped {} unchanged fonts",
-                    skipped
-                );
+            } else if !cli.verbose {
+                // In non-verbose mode, only show minimal output if something was skipped
+                if skipped > 0 {
+                    println!("No fonts added, {} unchanged", skipped);
+                }
             }
         }
         Commands::List => {
             // Initialize cache
             let cache = FontCache::new(cli.cache_path.as_deref())?;
+
+            // In verbose mode, display the cache path
+            if cli.verbose {
+                println!("# Cache: {}", cache.get_path().display());
+            }
 
             // Get all fonts from cache
             let font_paths = cache.get_all_font_paths()?;
@@ -421,8 +385,14 @@ pub fn execute(cli: Cli) -> Result<()> {
             if cli.json {
                 let json = serde_json::to_string_pretty(&font_paths)?;
                 println!("{}", json);
-            } else {
+            } else if cli.verbose {
+                // In verbose mode, show detailed information
                 println!("Found {} fonts in cache:", font_paths.len());
+                for path in font_paths {
+                    println!("{}", path);
+                }
+            } else {
+                // In non-verbose mode, only show the paths
                 for path in font_paths {
                     println!("{}", path);
                 }
@@ -431,6 +401,11 @@ pub fn execute(cli: Cli) -> Result<()> {
         Commands::Clean => {
             // Initialize cache
             let cache = FontCache::new(cli.cache_path.as_deref())?;
+
+            // In verbose mode, display the cache path
+            if cli.verbose {
+                println!("# Cache: {}", cache.get_path().display());
+            }
 
             // Get all fonts from cache
             let font_paths = cache.get_all_font_paths()?;
@@ -456,17 +431,23 @@ pub fn execute(cli: Cli) -> Result<()> {
                     "time_ms": elapsed.as_millis()
                 });
                 println!("{}", serde_json::to_string_pretty(&result)?);
-            } else {
+            } else if cli.verbose {
+                // In verbose mode, show detailed information
                 println!(
                     "Removed {} missing fonts, {} fonts remain in cache",
                     removed,
                     existing_paths.len()
                 );
+            } else {
+                // In non-verbose mode, only show minimal output if something was removed
+                if removed > 0 {
+                    println!("Removed {} fonts", removed);
+                }
             }
 
             // Optimize cache
             if removed > 0 {
-                if !cli.json {
+                if !cli.json && cli.verbose {
                     println!("Optimizing cache...");
                 }
                 cache.optimize()?;
@@ -513,25 +494,16 @@ fn collect_font_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         if path.is_file() && crate::font::is_font_file(path) {
             font_files.push(path.clone());
         } else if path.is_dir() {
-            // Walk directory recursively
-            for entry in WalkDir::new(path).follow_links(true).process_read_dir(
-                |_, _, _, dir_entry_results| {
-                    // Filter out entries that are not font files
-                    dir_entry_results.retain(|entry_result| {
-                        if let Ok(entry) = entry_result {
-                            entry.file_type().is_file() && {
-                                let path = entry.path();
-                                crate::font::is_font_file(&path)
-                            }
-                        } else {
-                            false
-                        }
-                    });
-                },
-            ) {
+            // Walk directory recursively using a simpler approach
+            for entry in WalkDir::new(path).follow_links(true) {
                 match entry {
                     Ok(entry) => {
-                        font_files.push(entry.path());
+                        if entry.file_type().is_file() {
+                            let entry_path = entry.path();
+                            if crate::font::is_font_file(&entry_path) {
+                                font_files.push(entry_path);
+                            }
+                        }
                     }
                     Err(e) => {
                         log::warn!("Error walking directory {}: {}", path.display(), e);
@@ -541,6 +513,15 @@ fn collect_font_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         } else {
             log::warn!("Path does not exist: {}", path.display());
         }
+    }
+
+    if font_files.is_empty() {
+        log::warn!(
+            "No font files found in the specified paths. Searched in: {:?}",
+            paths
+        );
+    } else {
+        log::debug!("Found {} font files", font_files.len());
     }
 
     Ok(font_files)

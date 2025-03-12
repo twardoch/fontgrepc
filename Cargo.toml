@@ -2,7 +2,7 @@
 name = "fontgrepc"
 version = "1.0.0"
 edition = "2021"
-authors = ["Adam Twardoch"]
+authors = ["fontgrepc authors", "Simon Cozens", "Adam Twardoch"]
 description = "A cache-based tool for fast font searching"
 license = "MIT"
 repository = "https://github.com/twardoch/fontgrepc"
@@ -38,6 +38,7 @@ env_logger = "0.11.2"
 log = "0.4.20"
 chrono = { version = "0.4.34", features = ["serde"] }
 indicatif = "0.17.8"
+lazy_static = "1.4.0"
 
 [dev-dependencies]
 tempfile = "3.8.0"
