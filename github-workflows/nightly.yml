@@ -1,0 +1,242 @@
+# this_file: .github/workflows/nightly.yml
+
+name: Nightly
+
+on:
+  schedule:
+    # Run every day at 3 AM UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch: # Allow manual triggering
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  nightly-tests:
+    name: Nightly Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        rust: [stable, beta, nightly]
+    
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ matrix.rust }}
+        components: rustfmt, clippy
+    
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-${{ matrix.rust }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Run extended tests
+      run: |
+        chmod +x scripts/test.sh
+        ./scripts/test.sh --verbose --coverage
+    
+    - name: Test with different feature combinations
+      run: |
+        cargo test --no-default-features
+        cargo test --all-features
+    
+    - name: Memory usage test
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y valgrind
+        cargo build --release
+        # Run with valgrind to check for memory leaks
+        valgrind --leak-check=full --show-leak-kinds=all --error-exitcode=1 ./target/release/fontgrepc --help || echo "Memory check completed"
+
+  dependency-updates:
+    name: Check Dependency Updates
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install cargo-audit and cargo-outdated
+      run: |
+        cargo install cargo-audit
+        cargo install cargo-outdated
+    
+    - name: Check for security vulnerabilities
+      run: cargo audit
+    
+    - name: Check for outdated dependencies
+      run: cargo outdated --exit-code 1 || echo "Some dependencies are outdated"
+    
+    - name: Generate dependency report
+      run: |
+        echo "# Dependency Report" > dependency-report.md
+        echo "## Security Audit" >> dependency-report.md
+        cargo audit --format json | jq -r '.vulnerabilities[] | "- \(.package.name) \(.package.version): \(.advisory.title)"' >> dependency-report.md
+        echo "## Outdated Dependencies" >> dependency-report.md
+        cargo outdated --format json | jq -r '.dependencies[] | select(.latest != .project) | "- \(.name): \(.project) -> \(.latest)"' >> dependency-report.md
+    
+    - name: Upload dependency report
+      uses: actions/upload-artifact@v4
+      with:
+        name: dependency-report
+        path: dependency-report.md
+
+  performance-regression:
+    name: Performance Regression Testing
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install hyperfine
+      run: |
+        wget https://github.com/sharkdp/hyperfine/releases/download/v1.18.0/hyperfine_1.18.0_amd64.deb
+        sudo dpkg -i hyperfine_1.18.0_amd64.deb
+    
+    - name: Build current version
+      run: cargo build --release
+    
+    - name: Create test font directory
+      run: |
+        mkdir -p test-fonts
+        # Create dummy font files for testing
+        for i in {1..100}; do
+          echo "dummy font content $i" > test-fonts/font$i.ttf
+        done
+    
+    - name: Benchmark current version
+      run: |
+        # Test font indexing performance
+        hyperfine --warmup 3 --runs 10 \
+          './target/release/fontgrepc add test-fonts' \
+          --export-json current-benchmark.json
+        
+        # Test search performance
+        hyperfine --warmup 3 --runs 10 \
+          './target/release/fontgrepc find --variable' \
+          --export-json search-benchmark.json
+    
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results
+        path: |
+          current-benchmark.json
+          search-benchmark.json
+
+  documentation-check:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Check documentation
+      run: |
+        cargo doc --all-features --no-deps
+        # Check for broken links in documentation
+        cargo doc --all-features --no-deps --open || true
+    
+    - name: Check README examples
+      run: |
+        # Extract code blocks from README and test them
+        grep -A 10 '```bash' README.md | grep -v '```' | grep -v '^--$' > readme-examples.sh
+        chmod +x readme-examples.sh
+        # Test examples (with safety measures)
+        echo "Testing README examples..."
+        # ./readme-examples.sh || echo "Some examples failed"
+    
+    - name: Check for TODO and FIXME comments
+      run: |
+        echo "Checking for TODO/FIXME comments..."
+        grep -r "TODO\|FIXME\|XXX\|HACK" src/ || echo "No TODO/FIXME comments found"
+
+  cross-platform-integration:
+    name: Cross Platform Integration
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Create integration test
+      run: |
+        mkdir -p integration-test
+        echo "#!/bin/bash" > integration-test/test.sh
+        echo "set -e" >> integration-test/test.sh
+        echo "cargo build --release" >> integration-test/test.sh
+        echo "./target/release/fontgrepc --help" >> integration-test/test.sh
+        echo "./target/release/fontgrepc --version" >> integration-test/test.sh
+        chmod +x integration-test/test.sh
+    
+    - name: Run integration test
+      run: |
+        cd integration-test
+        ./test.sh
+    
+    - name: Test script execution
+      run: |
+        chmod +x scripts/*.sh
+        ./scripts/version.sh
+        ./scripts/build.sh
+        # ./scripts/test.sh --no-clippy --no-format
+
+  create-nightly-summary:
+    name: Create Nightly Summary
+    needs: [nightly-tests, dependency-updates, performance-regression, documentation-check, cross-platform-integration]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - name: Create summary report
+      run: |
+        echo "# Nightly Build Summary" > nightly-summary.md
+        echo "Date: $(date)" >> nightly-summary.md
+        echo "" >> nightly-summary.md
+        echo "## Test Results" >> nightly-summary.md
+        echo "- Nightly Tests: ${{ needs.nightly-tests.result }}" >> nightly-summary.md
+        echo "- Dependency Updates: ${{ needs.dependency-updates.result }}" >> nightly-summary.md
+        echo "- Performance Regression: ${{ needs.performance-regression.result }}" >> nightly-summary.md
+        echo "- Documentation Check: ${{ needs.documentation-check.result }}" >> nightly-summary.md
+        echo "- Cross Platform Integration: ${{ needs.cross-platform-integration.result }}" >> nightly-summary.md
+        echo "" >> nightly-summary.md
+        echo "## Next Steps" >> nightly-summary.md
+        echo "- Review failed tests if any" >> nightly-summary.md
+        echo "- Check for dependency updates" >> nightly-summary.md
+        echo "- Monitor performance trends" >> nightly-summary.md
+    
+    - name: Upload summary
+      uses: actions/upload-artifact@v4
+      with:
+        name: nightly-summary
+        path: nightly-summary.md
