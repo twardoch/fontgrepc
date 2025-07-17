@@ -37,6 +37,8 @@ The fontgrepc project has been successfully upgraded with git-tag-based semversi
 - **Version consistency** between git tags and Cargo.toml
 
 ### 4. GitHub Actions Workflows ✅
+**Note**: Due to GitHub App permissions, workflow files are located in `github-workflows/` directory and need to be manually moved to `.github/workflows/` using the provided setup script.
+
 - **CI Pipeline** (`ci.yml`):
   - Multi-platform testing (Ubuntu, Windows, macOS)
   - Multiple Rust versions (stable, beta, nightly)
@@ -65,6 +67,11 @@ The fontgrepc project has been successfully upgraded with git-tag-based semversi
   - Fast feedback on pull requests
   - Code quality checks
   - Version consistency validation
+
+**Setup Instructions**:
+1. Run `./setup-github-workflows.sh` to move workflow files to the correct location
+2. Configure required GitHub secrets (CRATES_IO_TOKEN, CODECOV_TOKEN)
+3. Commit and push the workflow files
 
 ### 5. Multi-Platform Binary Releases ✅
 - **Target platforms**:
